@@ -1,14 +1,70 @@
-# Creates diplays for Putti et al., in preparation
-# Install environnement using conda env create --file make_videos.yaml
-# Version: 1.0 05/03/2025 jbw
+"""
+==============================================================================
+Date: February 11, 2025
+Version: 1.0
 
+Description:
+This script generates visualizations and 3D models for the manuscript by 
+Putti et al. (in preparation). The script includes:
+- Data processing and statistical analysis of synaptic distributions.
+- Visualization of neuron functional morphotypes and neurotransmitter classifications.
+- Identification and display of significantly active neurons based on functional 
+  imaging data.
+- Import and visualization of neuron meshes in Blender, with appropriate color 
+  coding based on neuronal classification.
+
+Dependencies:
+- Python 3.8+
+- Conda environment (install using: `conda env create --file make_videos.yaml`)
+- Required Python packages: h5py, pandas, numpy, matplotlib, scipy, seaborn, 
+  pathlib, Blender (for 3D visualization)
+
+Usage:
+- Modify file paths in the `ROOT_PATH` variable to match your local setup.
+- Run the script in Python for statistical analysis and figure generation.
+- Run Blender-specific sections in the Blender Python terminal for 3D visualization.
+
+File Structure:
+- The script is divided into sections:
+  1. Data Processing and Loading
+  2. Axo-Type Distributions Analysis
+  3. Functional Morphotypes Visualization
+  4. Neurotransmitter Classification
+  5. Active Neuron Detection and Visualization
+  6. Blender Import and 3D Visualization
+
+Output:
+- Figures are saved as high-resolution PDFs in the `ROOT_PATH` directory.
+- Active neuron data and significance values are returned for further analysis.
+- Blender-imported neuron meshes are colored and labeled based on their functional 
+  classification.
+
+License:
+- This code is intended for research purposes in conjunction with the 
+  manuscript by Putti et al. (in preparation). Redistribution or modification 
+  should be discussed with the author.
+
+Contact:
+Jonathan Boulanger-Weill  
+Harvard University & Institut de la Vision, Sorbonne Université Paris 
+Email: jonathanboulangerweill@harvard.edu  
+
+==============================================================================
+"""
+
+import os
+import h5py
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+import matplotlib.pyplot as plt
+from scipy.signal import savgol_filter
+from scipy import stats
 
 # Define file paths
 ROOT_PATH = Path("/Users/jonathanboulanger-weill/Dropbox (Harvard University)/hb_connectome/hindbrain_structure_function/clem_zfish1/collab_rgcs/")
+HDF5_PATH = "/Users/jonathanboulanger-weill/Dropbox (Harvard University)/hb_connectome/hindbrain_structure_function/clem_zfish1/function/all_cells_bars.h5"
 EXCEL_FILE_PATH = ROOT_PATH / "rgc_axons_output_020525.csv"
 SYP_FILE_PATH = ROOT_PATH / "rgc_axons_syp_020525.csv"
 OUTPUT_FILE = ROOT_PATH / "rgcs_outputs.pdf"
@@ -215,11 +271,13 @@ plt.show()
 
 # --------------------------- 4th PLOT: Activity ---------------------------
 
-import h5py
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.signal import savgol_filter
-import matplotlib
+# Color dictionary
+COLOR_CELL_TYPE_DICT_LINES = {
+    "bsPVPN": (81/255, 54/255, 187/255, 1),   # Deep Blue (#5136BB)
+    "nsPVIN": (243/255, 156/255, 18/255, 1),  # Bright Orange (#F39C12)
+    "nsPVPN": (248/255, 125/255, 210/255, 1),  # Vivid Orange (#F87D15)
+    "undetermined": (127/255, 140/255, 141/255, 1)  # Muted Gray (#7F8C8D)
+}
 
 def plot_neuron_activity(file_path, neuron_idx):
     """
@@ -286,42 +344,24 @@ def plot_neuron_activity(file_path, neuron_idx):
         ax.set_aspect(abs((x_right - x_left) / (y_low - y_high)) * ratio)
         plt.show()
 
-hdf5_path = "/Users/jonathanboulanger-weill/Dropbox (Harvard University)/hb_connectome/hindbrain_structure_function/clem_zfish1/function/all_cells_bars.h5"
-neuron_idx = 12432
-plot_neuron_activity(hdf5_path, neuron_idx) 
-
-# For several neurons
-def display_cluster_max_trials(file_path, neuron_indices):
-    with h5py.File(file_path, "r") as hdf_file:
-        for neuron_idx in neuron_indices:
-            neuron_group = hdf_file[f"neuron_{neuron_idx}"]
-            cluster_max_trials = neuron_group["cluster"][()]
-            
-            if cluster_max_trials == 0:
-                classification = 'integrator'
-            elif cluster_max_trials == 1:
-                classification = 'dynamic threshold'
-            elif cluster_max_trials == 2:
-                classification = 'motor command'
-            else:
-                classification = 'not classified'
-            
-            print(f"Neuron {neuron_idx} cluster_max_trials: {cluster_max_trials} ({classification})")
-
-# Example usage:
-SPV_outputs_idx = [5759, 4949, 15015, 10099, 11672, 10764, 12432, 8958, 13673, 7258, 5506, 2551, 13544, 7237] 
-
-display_cluster_max_trials(hdf5_path, SPV_outputs_idx)
-
-def plot_max_activity(cell_ids, hdf5_file_path, color_cell_type_dict_norm, cell_type, out_dir, dt=0.5):
+def plot_active_neurons(cell_ids, cell_types, hdf5_file_path, cell_type, out_dir, dt=0.5, alpha_threshold=0.05):
     with h5py.File(hdf5_file_path, "r") as hdf_file:
-        fig, ax = plt.subplots()
+        # Set figure size (height fixed to 1.564 inches, adjust width proportionally)
+        fig, ax = plt.subplots(figsize=(4, 1.564))  # Adjust width (4 in) as needed
+        
+        # Set font to Arial globally
+        plt.rcParams["font.family"] = "Arial"
+        plt.rcParams["axes.linewidth"] = 0.8  # Set axis thickness
 
-        # Initialize an array to accumulate the max activity traces
+        # Initialize arrays
         all_max_arrays = []
-        rise_time_constants = []
+        active_neuron_indices = []  # Store indices of significant neurons
+        active_neuron_pvalues = []  # Store p-values of significant neurons
 
-        for idx in cell_ids:
+        # Map cell IDs to their types
+        cell_id_to_type = {cell_ids[i]: cell_types[i] for i in range(len(cell_ids))}
+
+        for i, idx in enumerate(cell_ids):
             neuron_group = hdf_file[f"neuron_{idx}"]
             avg_activity_left = neuron_group["average_activity_left"][()]
             avg_activity_right = neuron_group["average_activity_right"][()]
@@ -333,47 +373,93 @@ def plot_max_activity(cell_ids, hdf5_file_path, color_cell_type_dict_norm, cell_
             max_right = np.max(smooth_avg_activity_right[40:120])
 
             # Determine which array has the maximum value
-            if max_left > max_right:
-                max_array = smooth_avg_activity_left
-            else:
-                max_array = smooth_avg_activity_right
+            max_array = smooth_avg_activity_left if max_left > max_right else smooth_avg_activity_right
 
-            # Normalize activity 
-            max_array = (max_array / np.nanmax(max_array)) * 100
-            # Accumulate the max activity traces
+            # Pool activity 
             all_max_arrays.append(max_array)
 
-            # Compute rise time constant from the stim onset 
-            peak = 0.90 * np.nanmax(max_array[40:120])  # 90% of the peak
-            peak_indices = np.where(max_array >= peak)[0]
-            if peak_indices.size > 0 & peak_indices.size < 120:
-                peak_index = peak_indices[0]
-                rise_time_constant = (peak_index - 40) * dt
+        # Convert list to NumPy array
+        all_max_arrays = np.array(all_max_arrays)  # Shape: (num_neurons, num_timepoints)
+        
+        # Define Time Windows (indices)
+        baseline_window = all_max_arrays[:, 0:40]  # Pre-stimulus (20s before stimulus)
+        early_stim_window = all_max_arrays[:, 40:80]  # 20s early during stimulus
+        late_stim_window = all_max_arrays[:, 80:120]  # 20s late during stimulus
+
+        # --- Identify Significant Neurons ---
+        for i in range(len(cell_ids)):
+            baseline = baseline_window[i]
+            early_stim = early_stim_window[i]
+            late_stim = late_stim_window[i]
+
+            # Check normality for early_stim vs baseline
+            _, p_early_normality = stats.shapiro(early_stim - baseline)
+            _, p_late_normality = stats.shapiro(late_stim - baseline)
+
+            # Choose test based on normality
+            if p_early_normality > 0.05:
+                _, p_early = stats.ttest_rel(early_stim, baseline, alternative='greater')
             else:
-                rise_time_constant = np.nan  # Assign NaN if indices are not found
-                print(f"Could not find peak for neuron {idx}")
+                _, p_early = stats.wilcoxon(early_stim, baseline, alternative='greater')
 
-            rise_time_constants.append(rise_time_constant)
+            if p_late_normality > 0.05:
+                _, p_late = stats.ttest_rel(late_stim, baseline, alternative='greater')
+            else:
+                _, p_late = stats.wilcoxon(late_stim, baseline, alternative='greater')
 
-            # Define time axis in seconds
-            time_axis = np.arange(len(avg_activity_left)) * dt
+            # If neuron is significantly active in either phase, include it
+            if p_early < alpha_threshold or p_late < alpha_threshold:
+                active_neuron_indices.append(i)
+                active_neuron_pvalues.append((cell_ids[i], p_early, p_late))
 
-            plt.plot(time_axis, max_array, color=color_cell_type_dict_norm.get(cell_type), alpha=0.7, linestyle='-', linewidth=1)
+        # --- Plot Only Significant Neurons ---
+        num_active_neurons = len(active_neuron_indices)
 
-        # Plot the mean of max_responses
-        mean_max_array = np.nanmean(all_max_arrays, axis=0)
-        plt.plot(time_axis, mean_max_array, color='black', alpha=0.7, linestyle='-', linewidth=2)
+        if num_active_neurons > 0:
+            legend_handles = []
+            used_types = set()  # To track which types are already in legend
+
+            for i in active_neuron_indices:
+                neuron_type = cell_id_to_type[cell_ids[i]]
+                color = COLOR_CELL_TYPE_DICT_LINES[neuron_type]  # Assign color by neuron type
+                time_axis = np.arange(len(all_max_arrays[i])) * dt
+                
+                plt.plot(time_axis, all_max_arrays[i], color=color, alpha=0.7, linestyle='-', linewidth=1)
+
+                # Add to legend only once per type
+                if neuron_type not in used_types:
+                    legend_handles.append(plt.Line2D([0], [0], color=color, lw=2, label=neuron_type))
+                    used_types.add(neuron_type)
+
+            # Compute and plot the mean trace of active neurons
+            mean_active_array = np.nanmean(all_max_arrays[active_neuron_indices], axis=0)
+            plt.plot(time_axis, mean_active_array, color='black', alpha=0.7, linestyle='-', linewidth=2, label="Mean Active Response")
+
+            # Add legend
+            plt.legend(handles=legend_handles, loc='upper right', fontsize=8, frameon=False)
 
         # Overlay shaded rectangle for stimulus epoch
         plt.axvspan(20, 60, color='gray', alpha=0.1)
 
-        # Remove the axes and add the scale bars
-        ax.plot([0, 10], [-5, -5], color='k', lw=2)  # Time scale bar (10 sec)
-        ax.text(5, -7, '10 sec', ha='center', fontfamily='Arial', fontsize=14)
+        # Add a dashed line at y=0 during stimulation
+        plt.axhline(y=0, xmin=20/len(time_axis), xmax=60/len(time_axis), color='black', linestyle='dashed', linewidth=0.8)
+        
+        # Customize axis
+        ax.spines['top'].set_linewidth(0.8)
+        ax.spines['right'].set_linewidth(0.8)
+        ax.spines['left'].set_linewidth(0.8)
+        ax.spines['bottom'].set_linewidth(0.8)
 
-        # Adapted scale bar for normalized activity (using 10% of the normalized scale)
-        ax.plot([-2, -2], [0, 10], color='k', lw=2)  # Activity scale bar (10% of normalized activity)
-        ax.text(-2.5, 5, '10%', va='center', fontfamily='Arial', rotation=90, fontsize=14)
+        # Calculate correct scale bar height (20% of normalized scale)
+        scale_bar_height = 20  # Since normalization is in %
+
+        # Remove the axes and add the scale bars
+        ax.plot([0, 10], [-5, -5], color='k', lw=0.8)  # Time scale bar (10 sec)
+        ax.text(5, -7, '10 sec', ha='center', fontfamily='Arial', fontsize=8)
+
+        # Adapted scale bar for normalized activity (now using 20%)
+        ax.plot([-2, -2], [0, scale_bar_height], color='k', lw=0.8)  
+        ax.text(-2.5, scale_bar_height / 2, '20%', va='center', fontfamily='Arial', rotation=90, fontsize=8)
 
         # Set aspect ratio to 1 and remove the axis lines
         x_left, x_right = ax.get_xlim()
@@ -381,27 +467,32 @@ def plot_max_activity(cell_ids, hdf5_file_path, color_cell_type_dict_norm, cell_
         ax.set_aspect(abs((x_right - x_left) / (y_low - y_high)))
         ax.set_axis_off()  # Remove the axis
 
+        # Set plot title with active neuron count
+        plt.title(f"Active Neurons ({num_active_neurons}) - {cell_type}", fontsize=10, fontweight='bold')
         plt.show()
 
         # Save the figure
-        filename = f"{cell_type}_activity-traces.pdf"
+        filename = f"{cell_type}_active_neurons.pdf"
         output_path = os.path.join(out_dir, filename)
-        fig.savefig(output_path, dpi=1200)
+        fig.savefig(output_path, dpi=1200, bbox_inches='tight')
         print(f"Figure saved successfully at: {output_path}")
 
-        return rise_time_constants
-    
-COLOR_CELL_TYPE_DICT_LINES = {
-    "nspvin": (232/255, 77/255, 138/255, 1),    # Magenta-pink
-    "dynamic_threshold": (100/255, 197/255, 235/255, 1),          # Light blue
-    "motor_command": (127/255, 88/255, 175/255, 1),               # Purple
-    "default": (0.5, 0.5, 0.5, 0.7)                                # Gray for undefined clusters
-}
+        return num_active_neurons, active_neuron_pvalues
 
-plot_max_activity(SPV_outputs_idx, hdf5_path, COLOR_CELL_TYPE_DICT_LINES, "nspvin", ROOT_PATH, dt=0.5)
+# Single neuron activity     
+neuron_idx = 12432
+plot_neuron_activity(HDF5_PATH, neuron_idx) 
 
-##### BLENDER COLOR IMPORT
+# Significantly active neurons    
+SPV_outputs_idx = [5759, 4949, 15015, 10099, 11672, 10764, 12432, 8958, 13673, 7258, 5506, 2551, 13544, 7237] 
+SPV_outputs_types = ['nsPVIN', 'nsPVIN', 'nsPVIN', 'nsPVIN', 'nsPVIN', 'nsPVPN', 'undetermined', 'nsPVIN', 'bsPVPN', 'undetermined', 'undetermined', 'nsPVIN', 'bsPVPN', 'bsPVPN'] 
+
+plot_active_neurons(SPV_outputs_idx, SPV_outputs_types, HDF5_PATH, "nspvin_bars", ROOT_PATH, dt=0.5, alpha_threshold=0.01)
+
+# --------------------------- BLENDER IMPORT ---------------------------
 # %%
+
+# Note: this code works only in the Blender Terminal 
 
 import os
 import bpy
